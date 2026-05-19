@@ -1,0 +1,7 @@
+node_modules/
+db/tienda.db
+db/tienda.db-shm
+db/tienda.db-wal
+.env
+public/firebase-config.js
+.firebaserc
