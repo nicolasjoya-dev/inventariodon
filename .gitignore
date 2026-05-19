@@ -5,3 +5,4 @@ db/tienda.db-wal
 .env
 public/firebase-config.js
 .firebaserc
+firebase-debug.log

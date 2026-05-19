@@ -219,6 +219,8 @@ let anchetaParaCarrito  = null;
 let codigoProductoId    = null;
 let etiquetasCodigo     = [];
 let etiquetasCodigoCargadas = false;
+let importProductosPreview = [];
+let importProductosStats   = null;
 let scannerControls     = null;
 let scannerReader       = null;
 let scannerActive       = false;
@@ -797,6 +799,304 @@ window.guardarProducto = async function() {
   closeModal('modal-producto');
   renderInventarioPaginado();
   actualizarCategoriasCodigo();
+};
+
+/* ═══════════════════════════════════════════════════════
+   IMPORTAR INVENTARIO
+═══════════════════════════════════════════════════════ */
+const IMPORT_COLUMNAS = {
+  nombre: ['nombre', 'producto', 'descripcion', 'descripcion producto', 'name', 'product', 'item'],
+  categoria: ['categoria', 'category', 'grupo', 'linea', 'tipo'],
+  precio_compra: ['precio compra', 'precio_compra', 'compra', 'costo', 'precio costo', 'cost'],
+  precio_venta: ['precio venta', 'precio_venta', 'venta', 'precio', 'valor', 'price'],
+  stock: ['stock', 'existencia', 'existencias', 'cantidad', 'inventario', 'unidades'],
+  stock_minimo: ['stock minimo', 'stock_minimo', 'minimo', 'stock min', 'min'],
+  codigo_barras: ['codigo barras', 'codigo_barras', 'codigo', 'cod', 'barcode', 'cod barras'],
+  unidad: ['unidad', 'medida', 'unit']
+};
+
+function normalizarClaveImportacion(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function textoImportacion(value) {
+  return String(value ?? '').trim();
+}
+
+function numeroImportacion(value, fallback = 0) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  let raw = String(value ?? '').trim();
+  if (!raw) return fallback;
+  raw = raw.replace(/[^\d,.-]/g, '');
+  if (!raw || raw === '-' || raw === '.' || raw === ',') return fallback;
+
+  const lastComma = raw.lastIndexOf(',');
+  const lastDot = raw.lastIndexOf('.');
+  if (lastComma >= 0 && lastDot >= 0) {
+    raw = lastComma > lastDot
+      ? raw.replace(/\./g, '').replace(',', '.')
+      : raw.replace(/,/g, '');
+  } else if (lastComma >= 0) {
+    const parts = raw.split(',');
+    raw = parts[parts.length - 1].length <= 2 ? raw.replace(',', '.') : raw.replace(/,/g, '');
+  } else if (lastDot >= 0) {
+    const parts = raw.split('.');
+    if (parts.length > 2 || parts[parts.length - 1].length === 3) raw = raw.replace(/\./g, '');
+  }
+
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function valorImportacion(row, campo) {
+  const normalizada = new Map();
+  Object.entries(row || {}).forEach(([key, value]) => {
+    normalizada.set(normalizarClaveImportacion(key), value);
+  });
+
+  for (const alias of IMPORT_COLUMNAS[campo] || []) {
+    const key = normalizarClaveImportacion(alias);
+    if (normalizada.has(key)) return normalizada.get(key);
+  }
+  return '';
+}
+
+function productoDesdeFilaImportacion(row, index) {
+  const nombre = textoImportacion(valorImportacion(row, 'nombre'));
+  const codigo = limpiarCodigo(valorImportacion(row, 'codigo_barras'));
+  const data = {
+    nombre,
+    categoria: textoImportacion(valorImportacion(row, 'categoria')),
+    precio_compra: numeroImportacion(valorImportacion(row, 'precio_compra'), 0),
+    precio_venta: numeroImportacion(valorImportacion(row, 'precio_venta'), 0),
+    stock: numeroImportacion(valorImportacion(row, 'stock'), 0),
+    stock_minimo: numeroImportacion(valorImportacion(row, 'stock_minimo'), 5),
+    codigo_barras: codigo,
+    unidad: textoImportacion(valorImportacion(row, 'unidad')) || 'unidades'
+  };
+
+  const errores = [];
+  if (!data.nombre) errores.push('Sin nombre');
+  if (data.stock_minimo < 0) data.stock_minimo = 0;
+  return { index, data, errores };
+}
+
+function llaveNombreCategoriaImportacion(p) {
+  return `${normalizarClaveImportacion(p.nombre)}|${normalizarClaveImportacion(p.categoria)}`;
+}
+
+function mapasProductosImportacion(lista = productos) {
+  const porCodigo = new Map();
+  const porNombre = new Map();
+  lista.forEach(p => {
+    const codigo = limpiarCodigo(p.codigo_barras);
+    if (codigo && !porCodigo.has(codigo)) porCodigo.set(codigo, p);
+    const key = llaveNombreCategoriaImportacion(p);
+    if (p.nombre && !porNombre.has(key)) porNombre.set(key, p);
+  });
+  return { porCodigo, porNombre };
+}
+
+function productoExistenteImportacion(data, mapas) {
+  if (data.codigo_barras && mapas.porCodigo.has(data.codigo_barras)) return mapas.porCodigo.get(data.codigo_barras);
+  return mapas.porNombre.get(llaveNombreCategoriaImportacion(data)) || null;
+}
+
+function evaluarImportacion(rows, baseProductos = productos) {
+  const mapas = mapasProductosImportacion(baseProductos);
+  const vistos = new Set();
+  const detalles = rows.map((row, index) => {
+    const item = productoDesdeFilaImportacion(row, index + 1);
+    const key = item.data.codigo_barras
+      ? `cod:${item.data.codigo_barras}`
+      : `nom:${llaveNombreCategoriaImportacion(item.data)}`;
+    if (vistos.has(key)) item.errores.push('Duplicado en archivo');
+    vistos.add(key);
+    const existente = item.errores.length ? null : productoExistenteImportacion(item.data, mapas);
+    return {
+      ...item,
+      accion: item.errores.length ? 'error' : (existente ? 'actualizar' : 'crear'),
+      existenteId: existente?.id || null
+    };
+  });
+
+  return {
+    detalles,
+    validos: detalles.filter(d => d.errores.length === 0),
+    stats: {
+      total: detalles.length,
+      crear: detalles.filter(d => d.accion === 'crear').length,
+      actualizar: detalles.filter(d => d.accion === 'actualizar').length,
+      errores: detalles.filter(d => d.accion === 'error').length
+    }
+  };
+}
+
+function renderPreviewImportacion(resultado) {
+  const cont = $('import-preview');
+  const btn = $('import-confirm-btn');
+  if (!cont || !btn) return;
+  const { detalles, stats } = resultado;
+  btn.disabled = resultado.validos.length === 0;
+
+  const filas = detalles.slice(0, 60).map(d => {
+    const status = d.accion === 'error' ? d.errores.join(', ') : d.accion;
+    const statusClass = d.accion === 'actualizar' ? 'update' : d.accion === 'error' ? 'error' : '';
+    return `<tr>
+      <td>${d.index}</td>
+      <td>${escapeHtml(d.data.nombre || '—')}</td>
+      <td>${escapeHtml(d.data.categoria || '—')}</td>
+      <td>${escapeHtml(d.data.codigo_barras || '—')}</td>
+      <td>${d.data.stock}</td>
+      <td>${fmtCOP(d.data.precio_venta)}</td>
+      <td><span class="import-status ${statusClass}">${escapeHtml(status)}</span></td>
+    </tr>`;
+  }).join('');
+
+  cont.innerHTML = `
+    <div class="import-summary">
+      <div class="import-pill"><strong>${stats.total}</strong> Filas leidas</div>
+      <div class="import-pill"><strong>${stats.crear}</strong> Crear</div>
+      <div class="import-pill"><strong>${stats.actualizar}</strong> Actualizar</div>
+      <div class="import-pill"><strong>${stats.errores}</strong> Con error</div>
+    </div>
+    <table class="import-table">
+      <thead><tr><th>#</th><th>Nombre</th><th>Categoria</th><th>Codigo</th><th>Stock</th><th>Venta</th><th>Accion</th></tr></thead>
+      <tbody>${filas}</tbody>
+    </table>
+    ${detalles.length > 60 ? '<div class="empty" style="padding:12px">Mostrando las primeras 60 filas.</div>' : ''}
+  `;
+}
+
+async function leerArchivoImportacion(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (ext === 'json') {
+    const data = JSON.parse(await file.text());
+    if (Array.isArray(data)) return data;
+    if (Array.isArray(data.productos)) return data.productos;
+    if (Array.isArray(data.items)) return data.items;
+    throw new Error('El JSON debe ser un arreglo o tener una propiedad productos.');
+  }
+
+  if (!window.XLSX) throw new Error('No cargo la libreria para leer Excel. Revisa internet y recarga.');
+  const buffer = await file.arrayBuffer();
+  const workbook = window.XLSX.read(buffer, { type: 'array' });
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) throw new Error('El Excel no tiene hojas.');
+  return window.XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: '' });
+}
+
+window.openModalImportarInventario = function() {
+  importProductosPreview = [];
+  importProductosStats = null;
+  if ($('import-file')) $('import-file').value = '';
+  if ($('import-confirm-btn')) $('import-confirm-btn').disabled = true;
+  if ($('import-preview')) {
+    $('import-preview').innerHTML = '<div class="empty" style="padding:24px">Selecciona un archivo para revisar los productos antes de guardar.</div>';
+  }
+  openModal('modal-importar');
+};
+
+window.previsualizarImportacionInventario = async function() {
+  const file = $('import-file')?.files?.[0];
+  if (!file) return;
+  showMsg('import-msg', 'Leyendo archivo...', 'ok');
+  try {
+    productos = await getProductos(true);
+    const rows = await leerArchivoImportacion(file);
+    if (!Array.isArray(rows) || rows.length === 0) throw new Error('El archivo no tiene filas.');
+    const resultado = evaluarImportacion(rows, productos);
+    importProductosPreview = resultado.validos.map(d => d.data);
+    importProductosStats = resultado.stats;
+    renderPreviewImportacion(resultado);
+    showMsg('import-msg', `Archivo listo: ${resultado.validos.length} producto(s) validos.`, 'ok');
+  } catch (e) {
+    importProductosPreview = [];
+    importProductosStats = null;
+    if ($('import-confirm-btn')) $('import-confirm-btn').disabled = true;
+    showMsg('import-msg', e.message || 'No se pudo leer el archivo.', 'error');
+  }
+};
+
+async function guardarImportacionEnLotes(items) {
+  const mapas = mapasProductosImportacion(productos);
+  const vistos = new Set();
+  let batch = writeBatch(db());
+  let ops = 0;
+  let creados = 0;
+  let actualizados = 0;
+  const nuevosLocales = [];
+
+  const commitSiNecesario = async (forzar = false) => {
+    if (ops > 0 && (forzar || ops >= 450)) {
+      await batch.commit();
+      batch = writeBatch(db());
+      ops = 0;
+    }
+  };
+
+  for (const data of items) {
+    const key = data.codigo_barras
+      ? `cod:${data.codigo_barras}`
+      : `nom:${llaveNombreCategoriaImportacion(data)}`;
+    if (vistos.has(key)) continue;
+    vistos.add(key);
+
+    const existente = productoExistenteImportacion(data, mapas);
+    const ref = existente ? doc(db(), 'productos', existente.id) : doc(collection(db(), 'productos'));
+    const payload = existente
+      ? { ...data, actualizado: serverTimestamp() }
+      : { ...data, fecha_creacion: serverTimestamp() };
+
+    batch.set(ref, payload, { merge: true });
+    ops++;
+
+    const local = { id: existente?.id || ref.id, ...data };
+    if (data.codigo_barras) mapas.porCodigo.set(data.codigo_barras, local);
+    mapas.porNombre.set(llaveNombreCategoriaImportacion(data), local);
+    nuevosLocales.push(local);
+    if (existente) actualizados++;
+    else creados++;
+
+    await commitSiNecesario();
+  }
+
+  await commitSiNecesario(true);
+  return { creados, actualizados, nuevosLocales };
+}
+
+window.confirmarImportacionInventario = async function() {
+  if (importProductosPreview.length === 0) {
+    showMsg('import-msg', 'Primero selecciona y revisa un archivo.', 'error');
+    return;
+  }
+  const stats = importProductosStats || { crear: 0, actualizar: 0 };
+  if (!confirm(`Importar ${importProductosPreview.length} producto(s)? Crear: ${stats.crear}. Actualizar: ${stats.actualizar}.`)) return;
+
+  const btn = $('import-confirm-btn');
+  if (btn) btn.disabled = true;
+  showMsg('import-msg', 'Guardando en Firebase...', 'ok');
+  try {
+    productos = await getProductos(true);
+    const r = await guardarImportacionEnLotes(importProductosPreview);
+    invalidarProductosCache();
+    productos = await getProductos(true);
+    renderInventarioPaginado();
+    loadDashboard();
+    closeModal('modal-importar');
+    showMsg('inv-msg', `Importacion lista. Creados: ${r.creados}. Actualizados: ${r.actualizados}.`, 'ok');
+  } catch (e) {
+    console.warn('No se pudo importar inventario:', e.message || e);
+    showMsg('import-msg', e.message || 'No se pudo guardar la importacion.', 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 };
 
 function setScannerMsg(text, type = 'ok') {
