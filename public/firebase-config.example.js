@@ -1,14 +1,13 @@
 window.INVENTARIODON_CONFIG = {
   firebase: {
-    apiKey: "TU_API_KEY",
-    authDomain: "TU_PROYECTO.firebaseapp.com",
-    projectId: "TU_PROYECTO",
-    storageBucket: "TU_PROYECTO.firebasestorage.app",
-    messagingSenderId: "TU_MESSAGING_SENDER_ID",
-    appId: "TU_APP_ID",
-    measurementId: "TU_MEASUREMENT_ID"
-  },
+
+  apiKey: "AIzaSyAPhvvlfu-qMzEupRqJQyR5bJG_6Zi5xts",
+  authDomain: "edu-icfesv5.firebaseapp.com",
+  databaseURL: "https://edu-icfesv5-default-rtdb.firebaseio.com",
+  projectId: "edu-icfesv5",
+  storageBucket: "edu-icfesv5.firebasestorage.app",
+  messagingSenderId: "283879340689"},
   authorizedEmails: [
-    "correo-autorizado@empresa.com"
+    "nico.joya2010@gmail.com"
   ]
 };
